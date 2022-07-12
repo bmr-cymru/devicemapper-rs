@@ -5,7 +5,7 @@
 use std::{fmt, path::PathBuf, str::FromStr};
 
 use crate::{
-    core::{DevId, Device, DeviceInfo, DmCookie, DmFlags, DmName, DmOptions, DmUuid, DM},
+    core::{DevId, Device, DeviceInfo, DmUdevFlags, DmFlags, DmName, DmOptions, DmUuid, DM},
     result::{DmError, DmResult, ErrorEnum},
     shared::{
         device_create, device_exists, device_match, get_status, get_status_line_fields, message,
@@ -271,7 +271,7 @@ impl ThinDev {
             name,
             uuid,
             &table,
-            DmOptions::default().set_cookie(DmCookie::DM_UDEV_PRIMARY_SOURCE_FLAG),
+            DmOptions::default().set_udev_flags(DmUdevFlags::DM_UDEV_PRIMARY_SOURCE_FLAG),
         )?;
 
         Ok(ThinDev {
@@ -313,7 +313,7 @@ impl ThinDev {
                 name,
                 uuid,
                 &table,
-                DmOptions::default().set_cookie(DmCookie::DM_UDEV_PRIMARY_SOURCE_FLAG),
+                DmOptions::default().set_udev_flags(DmUdevFlags::DM_UDEV_PRIMARY_SOURCE_FLAG),
             )?;
             ThinDev {
                 dev_info: Box::new(dev_info),
@@ -355,7 +355,7 @@ impl ThinDev {
             snapshot_name,
             snapshot_uuid,
             &table,
-            DmOptions::default().set_cookie(DmCookie::DM_UDEV_PRIMARY_SOURCE_FLAG),
+            DmOptions::default().set_udev_flags(DmUdevFlags::DM_UDEV_PRIMARY_SOURCE_FLAG),
         )?);
         Ok(ThinDev { dev_info, table })
     }
