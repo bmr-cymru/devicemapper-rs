@@ -18,7 +18,7 @@ use crate::{
     core::{
         device::Device,
         deviceinfo::DeviceInfo,
-        dm_flags::DmFlags,
+        dm_flags::{DmFlags, DmUdevFlags},
         dm_ioctl as dmi,
         dm_options::DmOptions,
         errors,
@@ -54,7 +54,7 @@ impl DmOptions {
         allowable_flags: DmFlags,
     ) -> DmResult<dmi::Struct_dm_ioctl> {
         let clean_flags = allowable_flags & self.flags();
-        let event_nr = u32::from(self.udev_flags().bits()) << 16;
+        let event_nr = u32::from(self.udev_flags().bits()) << dmi::DM_UDEV_FLAGS_SHIFT;
         let mut hdr: dmi::Struct_dm_ioctl = devicemapper_sys::dm_ioctl {
             flags: clean_flags.bits(),
             event_nr,
@@ -116,6 +116,22 @@ impl DM {
         hdr.version[0] = ioctl_version.0;
         hdr.version[1] = ioctl_version.1;
         hdr.version[2] = ioctl_version.2;
+
+        // Set the DM_UDEV_PRIMARY_SOUCE_FLAG for device-mapper commands that
+        // generate uevents.
+        let primary_source_flag =
+            u32::from(DmUdevFlags::DM_UDEV_PRIMARY_SOURCE_FLAG.bits()) << dmi::DM_UDEV_FLAGS_SHIFT;
+        match ioctl as u32 {
+            dmi::DM_DEV_REMOVE_CMD | dmi::DM_DEV_RENAME_CMD => {
+                hdr.event_nr |= primary_source_flag;
+            }
+            dmi::DM_DEV_SUSPEND_CMD => {
+                if (hdr.flags & dmi::DM_SUSPEND_FLAG) == 0 {
+                    hdr.event_nr |= primary_source_flag;
+                }
+            }
+            _ => (),
+        };
 
         hdr.data_size = cmp::max(
             MIN_BUF_SIZE,
