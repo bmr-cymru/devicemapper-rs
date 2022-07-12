@@ -41,6 +41,9 @@ const DM_CTL_PATH: &str = "/dev/device-mapper";
 /// Start with a large buffer to make BUFFER_FULL rare. Libdm does this too.
 const MIN_BUF_SIZE: usize = 16 * 1024;
 
+/// Bit shift for encoding DM udev flags in Struct_dm_ioctl::event_nr
+const DM_UDEV_FLAGS_SHIFT: u32 = 16;
+
 /// Context needed for communicating with devicemapper.
 pub struct DM {
     file: File,
@@ -55,10 +58,8 @@ impl DmOptions {
     ) -> DmResult<dmi::Struct_dm_ioctl> {
         let clean_flags = allowable_flags & self.flags();
 
-        // Every ioctl is a primary source of udev events; this flag should
-        // always be set when an ioctl is sent.
-        let event_nr =
-            u32::from((self.udev_flags() | DmUdevFlags::DM_UDEV_PRIMARY_SOURCE_FLAG).bits()) << 16;
+        let event_nr = u32::from(self.udev_flags().bits()) << DM_UDEV_FLAGS_SHIFT;
+
         let mut hdr: dmi::Struct_dm_ioctl = Default::default();
 
         hdr.version[0] = dmi::DM_VERSION_MAJOR;
@@ -124,6 +125,20 @@ impl DM {
         // Vec v.  'hdr_slc' also aliases hdr as a &[u8], used first
         // to copy the hdr into v, and later to update the
         // possibly-modified hdr.
+
+        let primary_source_flag =
+            u32::from(DmUdevFlags::DM_UDEV_PRIMARY_SOURCE_FLAG.bits()) << DM_UDEV_FLAGS_SHIFT;
+        match ioctl as u32 {
+            dmi::DM_DEV_REMOVE_CMD | dmi::DM_DEV_RENAME_CMD => {
+                hdr.event_nr |= primary_source_flag;
+            }
+            dmi::DM_DEV_SUSPEND_CMD => {
+                if (hdr.flags & dmi::DM_SUSPEND_FLAG) == 0 {
+                    hdr.event_nr |= primary_source_flag;
+                }
+            }
+            _ => (),
+        };
 
         // Start with a large buffer to make BUFFER_FULL rare. Libdm
         // does this too.
