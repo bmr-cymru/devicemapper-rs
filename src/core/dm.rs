@@ -21,6 +21,10 @@ use crate::{
         dm_flags::{DmFlags, DmUdevFlags},
         dm_ioctl as dmi,
         dm_options::DmOptions,
+        dm_udev_sync::{
+            notify_sem_create, notify_sem_destroy, notify_sem_inc, notify_sem_dec,
+            notify_sem_wait
+        },
         errors,
         types::{DevId, DmName, DmNameBuf, DmUuid},
         util::{
@@ -43,6 +47,9 @@ const MIN_BUF_SIZE: usize = 16 * 1024;
 
 /// Bit shift for encoding DM udev flags in Struct_dm_ioctl::event_nr
 const DM_UDEV_FLAGS_SHIFT: u32 = 16;
+
+/// Mask selecting udev flags portion of Struct_dm_ioctl::event_nr
+const DM_UDEV_FLAGS_MASK: u32 = 0xffff0000;
 
 /// Context needed for communicating with devicemapper.
 pub struct DM {
@@ -126,6 +133,8 @@ impl DM {
         // to copy the hdr into v, and later to update the
         // possibly-modified hdr.
 
+        // Set the DM_UDEV_PRIMARY_SOUCE_FLAG for device-mapper commands that
+        // generate uevents.
         let primary_source_flag =
             u32::from(DmUdevFlags::DM_UDEV_PRIMARY_SOURCE_FLAG.bits()) << DM_UDEV_FLAGS_SHIFT;
         match ioctl as u32 {
@@ -139,7 +148,7 @@ impl DM {
             }
             _ => (),
         };
-
+        println!("Set kernel cookie to {}", hdr.event_nr);
         // Start with a large buffer to make BUFFER_FULL rare. Libdm
         // does this too.
         hdr.data_size = cmp::max(
@@ -322,16 +331,22 @@ impl DM {
         uuid: Option<&DmUuid>,
         options: DmOptions,
     ) -> DmResult<DeviceInfo> {
+        println!("GETTING HEADER");
         let mut hdr =
             options.to_ioctl_hdr(None, DmFlags::DM_READONLY | DmFlags::DM_PERSISTENT_DEV)?;
 
+        println!("SETTING NAME");
         Self::hdr_set_name(&mut hdr, name)?;
+        println!("SETTING UUID");
         if let Some(uuid) = uuid {
             Self::hdr_set_uuid(&mut hdr, uuid)?;
+            println!("SET UUID");
         }
 
+        println!("DOING IOCTL");
         self.do_ioctl(dmi::DM_DEV_CREATE_CMD as u8, &mut hdr, None)?;
-
+        println!("DID IOCTL");
+        println!("Returning DeviceInfo::new()");
         DeviceInfo::new(hdr)
     }
 
@@ -400,12 +415,44 @@ impl DM {
     /// dm.device_suspend(&id, DmOptions::default().set_flags(DmFlags::DM_SUSPEND)).unwrap();
     /// ```
     pub fn device_suspend(&self, id: &DevId<'_>, options: DmOptions) -> DmResult<DeviceInfo> {
+        let mut cookie = 0;
+        let mut semid = -1;
+        if (options.flags() & DmFlags::DM_SUSPEND) != DmFlags::DM_SUSPEND {
+            (cookie, semid) = notify_sem_create()?;
+            println!("Created cookie {} semid {}", cookie, semid);
+            if let Err(err) = notify_sem_inc(&options.udev_flags(), semid) {
+                if let Err(err2) = notify_sem_destroy(&options.udev_flags(), semid) {
+                    println!("Failed to clean up udev notification semaphore: {}", err2);
+                }
+                return Err(err);
+            }
+        }
         let mut hdr = options.to_ioctl_hdr(
             Some(id),
             DmFlags::DM_SUSPEND | DmFlags::DM_NOFLUSH | DmFlags::DM_SKIP_LOCKFS,
         )?;
 
+        hdr.event_nr |= !DM_UDEV_FLAGS_MASK & (cookie as u32);
+
         self.do_ioctl(dmi::DM_DEV_SUSPEND_CMD as u8, &mut hdr, None)?;
+
+        if cookie != 0 {
+            if (hdr.flags & dmi::DM_UEVENT_GENERATED_FLAG) == 0 {
+                if let Err(err) = notify_sem_dec(&options.udev_flags(), semid) {
+                    println!("Failed to clear notification semaphore state: {}", err);
+                    if let Err(err2) = notify_sem_destroy(&options.udev_flags(), semid) {
+                        println!("Failed to clean up notification semaphore: {}", err2);
+                    }
+                    return Err(err);
+                }
+            }
+            println!("Waiting on semid {} cookie {}", semid, cookie);
+            notify_sem_wait(&options.udev_flags(), semid)?;
+            println!("Destroying semid {} cookie {}", semid, cookie);
+            if let Err(err) = notify_sem_destroy(&options.udev_flags(), semid) {
+                println!("Failed to clean up notification semaphore: {}", err);
+            }
+        }
 
         DeviceInfo::new(hdr)
     }

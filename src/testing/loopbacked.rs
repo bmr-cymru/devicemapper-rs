@@ -128,9 +128,10 @@ where
     let device_paths: Vec<PathBuf> = loop_devices.iter().map(|x| x.path()).collect();
     let device_paths: Vec<&Path> = device_paths.iter().map(|x| x.as_path()).collect();
 
-    let result = panic::catch_unwind(|| test(&device_paths));
+    //let result = panic::catch_unwind(|| test(&device_paths));
+    test(&device_paths);
     let tear_down = clean_up();
 
-    result.unwrap();
+    //result.unwrap();
     tear_down.unwrap();
 }

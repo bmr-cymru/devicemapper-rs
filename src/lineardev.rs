@@ -544,8 +544,10 @@ impl LinearDev {
             device_match(dm, &dev, uuid)?;
             dev
         } else {
+            println!("Doing device_create()");
             let dev_info =
                 device_create(dm, name, uuid, &table, DmOptions::default(), create_options)?;
+            println!("Did device_create()");
             LinearDev {
                 dev_info: Box::new(dev_info),
                 table,
