@@ -99,7 +99,7 @@ fn gen_cookie() -> OperationResult<(u32, i32), std::io::Error> {
     }
 }
 
-pub fn notify_sem_create() -> DmResult<(u32, i32)> {
+fn notify_sem_create() -> DmResult<(u32, i32)> {
     let cookie_pair = retry(NoDelay.take(4), || gen_cookie());
     if let Err(err) = cookie_pair {
         error!("Failed to generate udev notification semaphore: {}", err);
@@ -123,7 +123,7 @@ pub fn notify_sem_create() -> DmResult<(u32, i32)> {
     }
 }
 
-pub fn notify_sem_destroy(cookie: u32, semid: i32) -> DmResult<()> {
+fn notify_sem_destroy(cookie: u32, semid: i32) -> DmResult<()> {
     if let Err(err) = semctl(semid, 0, IPC_RMID, None) {
         error!(
             "Failed to remove udev synchronization semaphore {} for cookie {}",
@@ -134,7 +134,7 @@ pub fn notify_sem_destroy(cookie: u32, semid: i32) -> DmResult<()> {
     Ok(())
 }
 
-pub fn notify_sem_inc(cookie: u32, semid: i32) -> DmResult<()> {
+fn notify_sem_inc(cookie: u32, semid: i32) -> DmResult<()> {
     // DM protocol always uses the 0th semaphore in the set identified by semid
     let mut sb = sembuf {
         sem_num: 0,
@@ -154,7 +154,7 @@ pub fn notify_sem_inc(cookie: u32, semid: i32) -> DmResult<()> {
     }
 }
 
-pub fn notify_sem_dec(cookie: u32, semid: i32) -> DmResult<()> {
+fn notify_sem_dec(cookie: u32, semid: i32) -> DmResult<()> {
     // DM protocol always uses the 0th semaphore in the set identified by semid
     let mut sb = sembuf {
         sem_num: 0,
@@ -174,7 +174,7 @@ pub fn notify_sem_dec(cookie: u32, semid: i32) -> DmResult<()> {
     }
 }
 
-pub fn notify_sem_wait(cookie: u32, semid: i32) -> DmResult<()> {
+fn notify_sem_wait(cookie: u32, semid: i32) -> DmResult<()> {
     if let Err(err) = notify_sem_dec(cookie, semid) {
         error!(
             concat!(
@@ -184,7 +184,7 @@ pub fn notify_sem_wait(cookie: u32, semid: i32) -> DmResult<()> {
             cookie, err
         );
         if let Err(err2) = notify_sem_destroy(cookie, semid) {
-            println!("Failed to clean up udev notification semaphore: {}", err2);
+            error!("Failed to clean up udev notification semaphore: {}", err2);
         }
     }
     let mut sb = sembuf {
@@ -202,6 +202,48 @@ pub fn notify_sem_wait(cookie: u32, semid: i32) -> DmResult<()> {
             Err(udev_sync_error_from_os())
         }
         _ => Ok(()),
+    }
+}
+
+pub fn udev_sync_begin(udev_flags: DmUdevFlags) -> DmResult<(u32, i32)> {
+    let (base_cookie, semid) = notify_sem_create()?;
+    let cookie = udev_flags.to_cookie(base_cookie);
+    debug!("Created cookie {} semid {}", cookie & dmi::DM_UDEV_PRIMARY_SOURCE_FLAG, semid);
+    if let Err(err) = notify_sem_inc(cookie, semid) {
+        if let Err(err2) = notify_sem_destroy(cookie, semid) {
+            error!("Failed to clean up udev notification semaphore: {}", err2);
+        }
+        return Err(err);
+    }
+    Ok((cookie as u32, semid))
+}
+
+pub fn udev_sync_end(hdr: &dmi::Struct_dm_ioctl, cookie: u32, semid: i32) -> DmResult<()> {
+    if cookie == 0 {
+        return Ok(())
+    }
+    if (hdr.flags & dmi::DM_UEVENT_GENERATED_FLAG) == 0 {
+        if let Err(err) = notify_sem_dec(cookie, semid) {
+            error!("Failed to clear notification semaphore state: {}", err);
+            if let Err(err2) = notify_sem_destroy(cookie, semid) {
+                error!("Failed to clean up notification semaphore: {}", err2);
+            }
+            return Err(err);
+        }
+    }
+    debug!("Waiting on semid {} cookie {}", semid, cookie);
+    notify_sem_wait(cookie, semid)?;
+    debug!("Destroying semid {} cookie {}", semid, cookie);
+    if let Err(err) = notify_sem_destroy(cookie, semid) {
+        error!("Failed to clean up notification semaphore: {}", err);
+    }
+    Ok(())
+}
+
+pub fn udev_sync_cancel(cookie: u32, semid: i32) {
+    debug!("Canceling udev sync for cookie {} semid {}", cookie, semid);
+    if let Err(err) = notify_sem_destroy(cookie, semid) {
+        error!("Failed to clean up notification semaphore: {}", err);
     }
 }
 
