@@ -73,3 +73,9 @@ bitflags! {
         const DM_UDEV_PRIMARY_SOURCE_FLAG = dmi::DM_UDEV_PRIMARY_SOURCE_FLAG;
     }
 }
+
+impl DmUdevFlags {
+    pub(crate) fn to_cookie(&self, key: u32) -> u32 {
+        ((self.bits() as u32) << dmi::DM_UDEV_FLAGS_SHIFT) | (key & !dmi::DM_UDEV_FLAGS_MASK)
+    }
+}
