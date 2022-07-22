@@ -207,6 +207,7 @@ fn notify_sem_wait(cookie: u32, semid: i32) -> DmResult<()> {
 
 pub fn udev_sync_begin(udev_flags: DmUdevFlags) -> DmResult<(u32, i32)> {
     let (base_cookie, semid) = notify_sem_create()?;
+    debug!("Generated base cookie {}", base_cookie);
     let cookie = udev_flags.to_cookie(base_cookie);
     debug!("Created cookie {} semid {}", cookie & dmi::DM_UDEV_PRIMARY_SOURCE_FLAG, semid);
     if let Err(err) = notify_sem_inc(cookie, semid) {
