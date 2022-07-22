@@ -22,7 +22,7 @@ use crate::{
         dm_ioctl as dmi,
         dm_options::DmOptions,
         dm_udev_sync::{
-            udev_sync_begin, udev_sync_end
+            udev_sync_begin, udev_sync_end, udev_sync_cancel,
         },
         errors,
         types::{DevId, DmName, DmNameBuf, DmUuid},
@@ -344,7 +344,10 @@ impl DM {
         debug!("Removing device {}", id);
         let (cookie, semid) = udev_sync_begin(options.udev_flags())?;
         hdr.event_nr |= !dmi::DM_UDEV_FLAGS_MASK & cookie;
-        self.do_ioctl(dmi::DM_DEV_REMOVE_CMD as u8, &mut hdr, None)?;
+        if let Err(err) = self.do_ioctl(dmi::DM_DEV_REMOVE_CMD as u8, &mut hdr, None) {
+            udev_sync_cancel(cookie, semid);
+            return Err(err);
+        }
         udev_sync_end(&hdr, cookie, semid)?;
 
         DeviceInfo::new(hdr)
