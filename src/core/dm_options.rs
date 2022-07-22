@@ -34,4 +34,9 @@ impl DmOptions {
     pub fn cookie(&self) -> DmCookie {
         self.cookie
     }
+
+    /// Test whether flag is set in this DmOptions.
+    pub fn has_flag(&self, flag: DmFlags) -> bool {
+        (self.flags().bits() & flag.bits()) == flag.bits()
+    }
 }
