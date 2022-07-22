@@ -304,7 +304,7 @@ impl DM {
         if let Some(uuid) = uuid {
             Self::hdr_set_uuid(&mut hdr, uuid)?;
         }
-
+        debug!("Creating device {} (uuid={:?})", name, uuid);
         self.do_ioctl(dmi::DM_DEV_CREATE_CMD as u8, &mut hdr, None)?;
 
         DeviceInfo::new(hdr)
@@ -320,6 +320,7 @@ impl DM {
     pub fn device_remove(&self, id: &DevId<'_>, options: DmOptions) -> DmResult<DeviceInfo> {
         let mut hdr = options.to_ioctl_hdr(Some(id), DmFlags::DM_DEFERRED_REMOVE)?;
 
+        debug!("Removing device {}", id);
         self.do_ioctl(dmi::DM_DEV_REMOVE_CMD as u8, &mut hdr, None)?;
 
         DeviceInfo::new(hdr)
@@ -346,6 +347,7 @@ impl DM {
         let mut hdr = options.to_ioctl_hdr(None, DmFlags::DM_UUID)?;
         Self::hdr_set_name(&mut hdr, old_name)?;
 
+        debug!("Renaming device {} to {}", old_name, new);
         self.do_ioctl(dmi::DM_DEV_RENAME_CMD as u8, &mut hdr, Some(&data_in))?;
 
         DeviceInfo::new(hdr)
@@ -379,7 +381,12 @@ impl DM {
             Some(id),
             DmFlags::DM_SUSPEND | DmFlags::DM_NOFLUSH | DmFlags::DM_SKIP_LOCKFS,
         )?;
-
+        let action = if options.has_flag(DmFlags::DM_SUSPEND) {
+            "Suspending"
+        } else {
+            "Resuming"
+        };
+        debug!("{} device {}", action, id);
         self.do_ioctl(dmi::DM_DEV_SUSPEND_CMD as u8, &mut hdr, None)?;
 
         DeviceInfo::new(hdr)
@@ -391,6 +398,7 @@ impl DM {
     pub fn device_info(&self, id: &DevId<'_>) -> DmResult<DeviceInfo> {
         let mut hdr = DmOptions::default().to_ioctl_hdr(Some(id), DmFlags::empty())?;
 
+        debug!("Retrieving info for {}", id);
         self.do_ioctl(dmi::DM_DEV_STATUS_CMD as u8, &mut hdr, None)?;
 
         DeviceInfo::new(hdr)
@@ -411,6 +419,7 @@ impl DM {
     ) -> DmResult<(DeviceInfo, Vec<(u64, u64, String, String)>)> {
         let mut hdr = options.to_ioctl_hdr(Some(id), DmFlags::DM_QUERY_INACTIVE_TABLE)?;
 
+        debug!("Waiting on event for {}", id);
         let data_out = self.do_ioctl(dmi::DM_DEV_WAIT_CMD as u8, &mut hdr, None)?;
 
         let status = DM::parse_table_status(hdr.target_count, &data_out)?;
@@ -503,6 +512,7 @@ impl DM {
         // Flatten targets into a buf
         let data_in = cursor.into_inner();
 
+        debug!("Loading table \"{:?}\" for {}", targets, id);
         self.do_ioctl(dmi::DM_TABLE_LOAD_CMD as u8, &mut hdr, Some(&data_in))?;
 
         DeviceInfo::new(hdr)
@@ -512,6 +522,7 @@ impl DM {
     pub fn table_clear(&self, id: &DevId<'_>) -> DmResult<DeviceInfo> {
         let mut hdr = DmOptions::default().to_ioctl_hdr(Some(id), DmFlags::empty())?;
 
+        debug!("Clearing inactive dable for {}", id);
         self.do_ioctl(dmi::DM_TABLE_CLEAR_CMD as u8, &mut hdr, None)?;
 
         DeviceInfo::new(hdr)
@@ -527,6 +538,7 @@ impl DM {
     pub fn table_deps(&self, id: &DevId<'_>, options: DmOptions) -> DmResult<Vec<Device>> {
         let mut hdr = options.to_ioctl_hdr(Some(id), DmFlags::DM_QUERY_INACTIVE_TABLE)?;
 
+        debug!("Querying dependencies for {}", id);
         let data_out = self.do_ioctl(dmi::DM_TABLE_DEPS_CMD as u8, &mut hdr, None)?;
 
         if data_out.is_empty() {
@@ -632,6 +644,7 @@ impl DM {
             DmFlags::DM_NOFLUSH | DmFlags::DM_STATUS_TABLE | DmFlags::DM_QUERY_INACTIVE_TABLE,
         )?;
 
+        debug!("Retrieving table status for {}", id);
         let data_out = self.do_ioctl(dmi::DM_TABLE_STATUS_CMD as u8, &mut hdr, None)?;
 
         let status = DM::parse_table_status(hdr.target_count, &data_out)?;
@@ -645,6 +658,7 @@ impl DM {
     pub fn list_versions(&self) -> DmResult<Vec<(String, u32, u32, u32)>> {
         let mut hdr = DmOptions::default().to_ioctl_hdr(None, DmFlags::empty())?;
 
+        debug!("Listing loaded target versions");
         let data_out = self.do_ioctl(dmi::DM_LIST_VERSIONS_CMD as u8, &mut hdr, None)?;
 
         let mut targets = Vec::new();
@@ -700,6 +714,7 @@ impl DM {
         data_in.extend(msg.as_bytes());
         data_in.push(b'\0');
 
+        debug!("Sending target message \"{}\" to {}", msg, id);
         let data_out = self.do_ioctl(dmi::DM_TARGET_MSG_CMD as u8, &mut hdr, Some(&data_in))?;
 
         let output = if (hdr.flags & DmFlags::DM_DATA_OUT.bits()) > 0 {
@@ -726,6 +741,7 @@ impl DM {
     pub fn arm_poll(&self) -> DmResult<DeviceInfo> {
         let mut hdr = DmOptions::default().to_ioctl_hdr(None, DmFlags::empty())?;
 
+        debug!("Issuing device-mapper arm poll command");
         self.do_ioctl(dmi::DM_DEV_ARM_POLL_CMD as u8, &mut hdr, None)?;
 
         DeviceInfo::new(hdr)
