@@ -345,9 +345,11 @@ impl DM {
         let (cookie, semid) = udev_sync_begin(options.udev_flags())?;
         hdr.event_nr |= !dmi::DM_UDEV_FLAGS_MASK & cookie;
         if let Err(err) = self.do_ioctl(dmi::DM_DEV_REMOVE_CMD as u8, &mut hdr, None) {
+            error!("ioctl error: {}", err);
             udev_sync_cancel(cookie, semid);
             return Err(err);
         }
+        debug!("Did ioctl {}", id);
         udev_sync_end(&hdr, cookie, semid)?;
 
         DeviceInfo::new(hdr)
@@ -413,16 +415,14 @@ impl DM {
             Some(id),
             DmFlags::DM_SUSPEND | DmFlags::DM_NOFLUSH | DmFlags::DM_SKIP_LOCKFS,
         )?;
-        let action = if options.has_flag(DmFlags::DM_SUSPEND) {
-            "Suspending"
-        } else {
-            "Resuming"
-        };
-        debug!("{} device {}", action, id);
 
-        if (options.flags() & DmFlags::DM_SUSPEND) != DmFlags::DM_SUSPEND {
+        if options.has_flag(DmFlags::DM_SUSPEND) {
+            debug!("Resuming device {}", id);
             (cookie, semid) = udev_sync_begin(options.udev_flags())?;
+        } else {
+            debug!("Suspending device {}", id);
         }
+
         hdr.event_nr |= !dmi::DM_UDEV_FLAGS_MASK & (cookie as u32);
 
         self.do_ioctl(dmi::DM_DEV_SUSPEND_CMD as u8, &mut hdr, None)?;
