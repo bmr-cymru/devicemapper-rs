@@ -21,6 +21,9 @@ use crate::{
         dm_flags::{DmFlags, DmUdevFlags},
         dm_ioctl as dmi,
         dm_options::DmOptions,
+        dm_udev_sync::{
+            udev_sync_begin, udev_sync_end
+        },
         errors,
         types::{DevId, DmName, DmNameBuf, DmUuid},
         util::{
@@ -132,6 +135,8 @@ impl DM {
             }
             _ => (),
         };
+
+        debug!("Set kernel cookie to {}", hdr.event_nr);
 
         hdr.data_size = cmp::max(
             MIN_BUF_SIZE,
@@ -337,7 +342,10 @@ impl DM {
         let mut hdr = options.to_ioctl_hdr(Some(id), DmFlags::DM_DEFERRED_REMOVE)?;
 
         debug!("Removing device {}", id);
+        let (cookie, semid) = udev_sync_begin(options.udev_flags())?;
+        hdr.event_nr |= !dmi::DM_UDEV_FLAGS_MASK & cookie;
         self.do_ioctl(dmi::DM_DEV_REMOVE_CMD as u8, &mut hdr, None)?;
+        udev_sync_end(&hdr, cookie, semid)?;
 
         DeviceInfo::new(hdr)
     }
@@ -364,7 +372,10 @@ impl DM {
         Self::hdr_set_name(&mut hdr, old_name)?;
 
         debug!("Renaming device {} to {}", old_name, new);
+        let (cookie, semid) = udev_sync_begin(options.udev_flags())?;
+        hdr.event_nr |= !dmi::DM_UDEV_FLAGS_MASK & cookie;
         self.do_ioctl(dmi::DM_DEV_RENAME_CMD as u8, &mut hdr, Some(&data_in))?;
+        udev_sync_end(&hdr, cookie, semid)?;
 
         DeviceInfo::new(hdr)
     }
@@ -393,6 +404,8 @@ impl DM {
     /// dm.device_suspend(&id, DmOptions::default().set_flags(DmFlags::DM_SUSPEND)).unwrap();
     /// ```
     pub fn device_suspend(&self, id: &DevId<'_>, options: DmOptions) -> DmResult<DeviceInfo> {
+        let mut cookie = 0;
+        let mut semid = -1;
         let mut hdr = options.to_ioctl_hdr(
             Some(id),
             DmFlags::DM_SUSPEND | DmFlags::DM_NOFLUSH | DmFlags::DM_SKIP_LOCKFS,
@@ -403,7 +416,15 @@ impl DM {
             "Resuming"
         };
         debug!("{} device {}", action, id);
+
+        if (options.flags() & DmFlags::DM_SUSPEND) != DmFlags::DM_SUSPEND {
+            (cookie, semid) = udev_sync_begin(options.udev_flags())?;
+        }
+        hdr.event_nr |= !dmi::DM_UDEV_FLAGS_MASK & (cookie as u32);
+
         self.do_ioctl(dmi::DM_DEV_SUSPEND_CMD as u8, &mut hdr, None)?;
+
+        udev_sync_end(&hdr, cookie, semid)?;
 
         DeviceInfo::new(hdr)
     }
