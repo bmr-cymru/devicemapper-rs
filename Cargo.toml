@@ -14,10 +14,12 @@ exclude = [".gitignore", ".github/*", "Makefile"]
 
 [dependencies]
 bitflags = "1.1.0"
+env_logger="0.9.0"
 nix = "0.24.0"
 semver = "1.0.0"
 serde = "1.0.60"
 lazy_static = "1.2.0"
+log = "0.4.14"
 
 [dev-dependencies]
 libmount = "0.1.11"
