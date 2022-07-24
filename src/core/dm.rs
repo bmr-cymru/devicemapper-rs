@@ -122,15 +122,10 @@ impl DM {
 
         // Set the DM_UDEV_PRIMARY_SOUCE_FLAG for device-mapper commands that
         // generate uevents.
-        let primary_source_flag =
-            u32::from(DmUdevFlags::DM_UDEV_PRIMARY_SOURCE_FLAG.bits()) << dmi::DM_UDEV_FLAGS_SHIFT;
         match ioctl as u32 {
-            dmi::DM_DEV_REMOVE_CMD | dmi::DM_DEV_RENAME_CMD => {
-                hdr.event_nr |= primary_source_flag;
-            }
-            dmi::DM_DEV_SUSPEND_CMD => {
+            dmi::DM_DEV_REMOVE_CMD | dmi::DM_DEV_RENAME_CMD | dmi::DM_DEV_SUSPEND_CMD => {
                 if (hdr.flags & dmi::DM_SUSPEND_FLAG) == 0 {
-                    hdr.event_nr |= primary_source_flag;
+                    hdr.event_nr |= DmUdevFlags::DM_UDEV_PRIMARY_SOURCE_FLAG.bits() << dmi::DM_UDEV_FLAGS_SHIFT;
                 }
             }
             _ => (),
