@@ -374,7 +374,11 @@ impl DM {
         debug!("Renaming device {} to {}", old_name, new);
         let (cookie, semid) = udev_sync_begin(options.udev_flags())?;
         hdr.event_nr |= !dmi::DM_UDEV_FLAGS_MASK & cookie;
-        self.do_ioctl(dmi::DM_DEV_RENAME_CMD as u8, &mut hdr, Some(&data_in))?;
+        if let Err(err) = self.do_ioctl(dmi::DM_DEV_RENAME_CMD as u8, &mut hdr, Some(&data_in)) {
+            error!("Rename ioctl error: {}", err);
+            udev_sync_cancel(cookie, semid);
+            return Err(err);
+        }
         udev_sync_end(&hdr, cookie, semid)?;
 
         DeviceInfo::new(hdr)
