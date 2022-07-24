@@ -340,7 +340,7 @@ impl DM {
         let (cookie, semid) = udev_sync_begin(options.udev_flags())?;
         hdr.event_nr |= !dmi::DM_UDEV_FLAGS_MASK & cookie;
         if let Err(err) = self.do_ioctl(dmi::DM_DEV_REMOVE_CMD as u8, &mut hdr, None) {
-            error!("ioctl error: {}", err);
+            error!("Remove ioctl error: {}", err);
             udev_sync_cancel(cookie, semid);
             return Err(err);
         }
