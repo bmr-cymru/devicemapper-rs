@@ -115,6 +115,8 @@ impl DM {
         hdr: &mut dmi::Struct_dm_ioctl,
         in_data: Option<&[u8]>,
     ) -> DmResult<Vec<u8>> {
+        let mut cookie = 0;
+        let mut semid = -1;
         let ioctl_version = dmi::ioctl_to_version(ioctl);
         hdr.version[0] = ioctl_version.0;
         hdr.version[1] = ioctl_version.1;
@@ -126,6 +128,8 @@ impl DM {
             dmi::DM_DEV_REMOVE_CMD | dmi::DM_DEV_RENAME_CMD | dmi::DM_DEV_SUSPEND_CMD => {
                 if (hdr.flags & dmi::DM_SUSPEND_FLAG) == 0 {
                     hdr.event_nr |= DmUdevFlags::DM_UDEV_PRIMARY_SOURCE_FLAG.bits() << dmi::DM_UDEV_FLAGS_SHIFT;
+                    (cookie, semid) = udev_sync_begin(hdr.event_nr)?;
+                    hdr.event_nr |= !dmi::DM_UDEV_FLAGS_MASK & cookie;
                 }
             }
             _ => (),
@@ -161,6 +165,7 @@ impl DM {
             if let Err(err) =
                 unsafe { convert_ioctl_res!(nix_ioctl(self.file.as_raw_fd(), op, v.as_mut_ptr())) }
             {
+                udev_sync_cancel(cookie, semid);
                 return Err(DmError::Core(errors::Error::Ioctl(
                     DeviceInfo::new(*hdr).ok().map(Box::new),
                     Box::new(err),
@@ -190,6 +195,9 @@ impl DM {
 
         // hdr possibly modified so copy back
         hdr_slc.clone_from_slice(&v[..hdr.data_start as usize]);
+
+        // Synchronize with udev event processing
+        udev_sync_end(&hdr, cookie, semid)?;
 
         // Return header data section.
         let new_data_off = cmp::max(hdr.data_start, hdr.data_size);
@@ -337,15 +345,7 @@ impl DM {
         let mut hdr = options.to_ioctl_hdr(Some(id), DmFlags::DM_DEFERRED_REMOVE)?;
 
         debug!("Removing device {}", id);
-        let (cookie, semid) = udev_sync_begin(options.udev_flags())?;
-        hdr.event_nr |= !dmi::DM_UDEV_FLAGS_MASK & cookie;
-        if let Err(err) = self.do_ioctl(dmi::DM_DEV_REMOVE_CMD as u8, &mut hdr, None) {
-            error!("Remove ioctl error: {}", err);
-            udev_sync_cancel(cookie, semid);
-            return Err(err);
-        }
-        debug!("Did ioctl {}", id);
-        udev_sync_end(&hdr, cookie, semid)?;
+        self.do_ioctl(dmi::DM_DEV_REMOVE_CMD as u8, &mut hdr, None)?;
 
         DeviceInfo::new(hdr)
     }
@@ -372,14 +372,7 @@ impl DM {
         Self::hdr_set_name(&mut hdr, old_name)?;
 
         debug!("Renaming device {} to {}", old_name, new);
-        let (cookie, semid) = udev_sync_begin(options.udev_flags())?;
-        hdr.event_nr |= !dmi::DM_UDEV_FLAGS_MASK & cookie;
-        if let Err(err) = self.do_ioctl(dmi::DM_DEV_RENAME_CMD as u8, &mut hdr, Some(&data_in)) {
-            error!("Rename ioctl error: {}", err);
-            udev_sync_cancel(cookie, semid);
-            return Err(err);
-        }
-        udev_sync_end(&hdr, cookie, semid)?;
+        self.do_ioctl(dmi::DM_DEV_RENAME_CMD as u8, &mut hdr, Some(&data_in))?;
 
         DeviceInfo::new(hdr)
     }
@@ -408,30 +401,19 @@ impl DM {
     /// dm.device_suspend(&id, DmOptions::default().set_flags(DmFlags::DM_SUSPEND)).unwrap();
     /// ```
     pub fn device_suspend(&self, id: &DevId<'_>, options: DmOptions) -> DmResult<DeviceInfo> {
-        let mut cookie = 0;
-        let mut semid = -1;
         let mut hdr = options.to_ioctl_hdr(
             Some(id),
             DmFlags::DM_SUSPEND | DmFlags::DM_NOFLUSH | DmFlags::DM_SKIP_LOCKFS,
         )?;
 
         let action = if options.has_flag(DmFlags::DM_SUSPEND) {
-            (cookie, semid) = udev_sync_begin(options.udev_flags())?;
             "Resume"
         } else {
             "Suspend"
         };
 
-        hdr.event_nr |= !dmi::DM_UDEV_FLAGS_MASK & (cookie as u32);
-
         debug!("{} device {}", action, id);
-        if let Err(err) = self.do_ioctl(dmi::DM_DEV_SUSPEND_CMD as u8, &mut hdr, None) {
-            error!("{} ioctl error: {}", action, err);
-            udev_sync_cancel(cookie, semid);
-            return Err(err);
-        }
-
-        udev_sync_end(&hdr, cookie, semid)?;
+        self.do_ioctl(dmi::DM_DEV_SUSPEND_CMD as u8, &mut hdr, None)?;
 
         DeviceInfo::new(hdr)
     }

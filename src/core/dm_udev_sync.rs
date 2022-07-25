@@ -205,11 +205,11 @@ fn notify_sem_wait(cookie: u32, semid: i32) -> DmResult<()> {
     }
 }
 
-pub fn udev_sync_begin(udev_flags: DmUdevFlags) -> DmResult<(u32, i32)> {
+pub fn udev_sync_begin(event_nr: u32) -> DmResult<(u32, i32)> {
     let (base_cookie, semid) = notify_sem_create()?;
-    debug!("Generated base cookie {}", base_cookie);
-    let cookie = udev_flags.to_cookie(base_cookie);
-    debug!("Created cookie {} semid {}", cookie & dmi::DM_UDEV_PRIMARY_SOURCE_FLAG, semid);
+    debug!("Generated cookie key {}", base_cookie);
+    let cookie = event_nr | (base_cookie & !dmi::DM_UDEV_FLAGS_MASK);
+    debug!("Created cookie {} semid {}", cookie, semid);
     if let Err(err) = notify_sem_inc(cookie, semid) {
         if let Err(err2) = notify_sem_destroy(cookie, semid) {
             error!("Failed to clean up udev notification semaphore: {}", err2);
@@ -221,7 +221,7 @@ pub fn udev_sync_begin(udev_flags: DmUdevFlags) -> DmResult<(u32, i32)> {
 
 pub fn udev_sync_end(hdr: &dmi::Struct_dm_ioctl, cookie: u32, semid: i32) -> DmResult<()> {
     if cookie == 0 {
-        return Ok(())
+        return Ok(());
     }
     if (hdr.flags & dmi::DM_UEVENT_GENERATED_FLAG) == 0 {
         if let Err(err) = notify_sem_dec(cookie, semid) {
@@ -242,6 +242,9 @@ pub fn udev_sync_end(hdr: &dmi::Struct_dm_ioctl, cookie: u32, semid: i32) -> DmR
 }
 
 pub fn udev_sync_cancel(cookie: u32, semid: i32) {
+    if cookie == 0 && semid == -1 {
+        return;
+    }
     debug!("Canceling udev sync for cookie {} semid {}", cookie, semid);
     if let Err(err) = notify_sem_destroy(cookie, semid) {
         error!("Failed to clean up notification semaphore: {}", err);
