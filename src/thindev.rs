@@ -623,8 +623,14 @@ mod tests {
         // Create the XFS FS on top of the thin device
         xfs_create_fs(&td.devnode()).unwrap();
 
+        // Synchronize with udev processing triggered by mkfs.xfs
+        udev_settle().unwrap();
+
         // Travis CI is old doesn't support setting uuid during FS creation.
         let uuid = set_new_fs_uuid(&td.devnode());
+
+        // Synchronize with udev processing triggered by xfs_admin
+        udev_settle().unwrap();
 
         validate(&uuid, &td.devnode());
 
