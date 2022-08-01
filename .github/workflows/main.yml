@@ -85,7 +85,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get -q update
-          sudo apt-get -y install libclang-dev
+          sudo apt-get -y install clang libdevmapper-dev
       - uses: actions-rs/toolchain@v1
         with:
           components: cargo
@@ -104,7 +104,7 @@ jobs:
     steps:
       - uses: actions/checkout@v2
       - name: Install dependencies
-        run: apk add cargo clang-dev linux-headers make rust
+        run: apk add cargo clang-dev linux-headers lvm2-dev make rust
       - name: Test build on Alpine Linux
         run: make -f Makefile build
 
@@ -130,6 +130,7 @@ jobs:
           dnf install -y
           clang
           curl
+          device-mapper-devel
           git
           make
           openssl-devel
