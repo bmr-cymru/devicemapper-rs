@@ -12,7 +12,8 @@ use std::{
     slice, str,
 };
 
-use nix::libc::ioctl as nix_ioctl;
+use nix::{errno, libc::ioctl as nix_ioctl};
+use retry::{Error as RetryError, delay::Fixed, retry_with_index, OperationResult};
 
 use crate::{
     core::{
@@ -41,6 +42,12 @@ const DM_CTL_PATH: &str = "/dev/device-mapper";
 
 /// Start with a large buffer to make BUFFER_FULL rare. Libdm does this too.
 const MIN_BUF_SIZE: usize = 16 * 1024;
+
+/// Ioctl retry limit
+const IOCTL_RETRIES: usize = 24;
+
+/// Ioctl retru delay
+const IOCTL_MSLEEP_DELAY: u64 = 200;
 
 /// Context needed for communicating with devicemapper.
 pub struct DM {
@@ -104,6 +111,26 @@ impl DM {
         &self.file
     }
 
+    fn ioctl(
+        &self,
+        ioctl: u8,
+        hdr: &mut dmi::Struct_dm_ioctl,
+        in_data: Option<&[u8]>,
+    ) -> DmResult<Vec<u8>> {
+        match retry_with_index(Fixed::from_millis(IOCTL_MSLEEP_DELAY).take(IOCTL_RETRIES), |i| {
+            trace!("do_ioctl try {} of {}", i, IOCTL_RETRIES + 1);
+            self.do_ioctl(ioctl, hdr, in_data)
+        }) {
+            Ok(res) => Ok(res),
+            Err(err) => {
+                match err {
+                    RetryError::Operation { error, .. } => Err(error),
+                    RetryError::Internal(_) => Err(DmError::Core(errors::Error::UdevSync("Error retrying ioctl".to_string())))
+                }
+            },
+        }
+    }
+
     // Give this a filled-in header and optionally add'l stuff.
     // Does the ioctl and maybe returns stuff. Handles BUFFER_FULL flag.
     //
@@ -112,7 +139,7 @@ impl DM {
         ioctl: u8,
         hdr: &mut dmi::Struct_dm_ioctl,
         in_data: Option<&[u8]>,
-    ) -> DmResult<Vec<u8>> {
+    ) -> OperationResult<Vec<u8>, DmError> {
         let ioctl_version = dmi::ioctl_to_version(ioctl);
         hdr.version[0] = ioctl_version.0;
         hdr.version[1] = ioctl_version.1;
@@ -129,7 +156,11 @@ impl DM {
             _ => 0,
         };
 
-        let sync = UdevSync::begin(udev_flags)?;
+        let sync = UdevSync::begin(udev_flags);
+        if sync.is_err() {
+            return OperationResult::Err(sync.unwrap_err());
+        }
+        let sync = sync.unwrap();
         hdr.event_nr |= sync.cookie();
 
         debug!("Set kernel cookie to {}", hdr.event_nr);
@@ -164,10 +195,17 @@ impl DM {
             {
                 // Cancel udev sync and clean up semaphore
                 sync.cancel();
-                return Err(DmError::Core(errors::Error::Ioctl(
-                    DeviceInfo::new(*hdr).ok().map(Box::new),
-                    Box::new(err),
-                )));
+                if err == errno::Errno::EBUSY && ioctl == dmi::DM_DEV_REMOVE_CMD as u8 {
+                    return OperationResult::Retry(DmError::Core(errors::Error::Ioctl(
+                        DeviceInfo::new(*hdr).ok().map(Box::new),
+                        Box::new(err),
+                    )));
+                } else {
+                    return OperationResult::Err(DmError::Core(errors::Error::Ioctl(
+                        DeviceInfo::new(*hdr).ok().map(Box::new),
+                        Box::new(err),
+                    )));
+                }
             }
             // If DM was able to write the requested data into the provided buffer, break the loop
             if (hdr.flags & DmFlags::DM_BUFFER_FULL.bits()) == 0 {
@@ -181,7 +219,7 @@ impl DM {
             // the size to exceed u32::MAX.
             let len = v.len();
             if len == u32::MAX as usize {
-                return Err(DmError::Core(errors::Error::IoctlResultTooLarge));
+                return OperationResult::Err(DmError::Core(errors::Error::IoctlResultTooLarge));
             }
             v.resize((len as u32).saturating_mul(2) as usize, 0);
 
@@ -195,18 +233,20 @@ impl DM {
         hdr_slc.clone_from_slice(&v[..hdr.data_start as usize]);
 
         // Synchronize with udev event processing
-        sync.end((hdr.flags & dmi::DM_UEVENT_GENERATED_FLAG) != 0)?;
+        if sync.end((hdr.flags & dmi::DM_UEVENT_GENERATED_FLAG) != 0).is_err() {
+            warn!("Error ending UdevSync transaction");
+        }
 
         // Return header data section.
         let new_data_off = cmp::max(hdr.data_start, hdr.data_size);
-        Ok(v[hdr.data_start as usize..new_data_off as usize].to_vec())
+        OperationResult::Ok(v[hdr.data_start as usize..new_data_off as usize].to_vec())
     }
 
     /// Devicemapper version information: Major, Minor, and patchlevel versions.
     pub fn version(&self) -> DmResult<(u32, u32, u32)> {
         let mut hdr = DmOptions::default().to_ioctl_hdr(None, DmFlags::empty())?;
 
-        self.do_ioctl(dmi::DM_VERSION_CMD as u8, &mut hdr, None)?;
+        self.ioctl(dmi::DM_VERSION_CMD as u8, &mut hdr, None)?;
 
         Ok((hdr.version[0], hdr.version[1], hdr.version[2]))
     }
@@ -221,7 +261,7 @@ impl DM {
     pub fn remove_all(&self, options: DmOptions) -> DmResult<()> {
         let mut hdr = options.to_ioctl_hdr(None, DmFlags::DM_DEFERRED_REMOVE)?;
 
-        self.do_ioctl(dmi::DM_REMOVE_ALL_CMD as u8, &mut hdr, None)?;
+        self.ioctl(dmi::DM_REMOVE_ALL_CMD as u8, &mut hdr, None)?;
 
         Ok(())
     }
@@ -231,7 +271,7 @@ impl DM {
     /// support it, each device's last event_nr.
     pub fn list_devices(&self) -> DmResult<Vec<(DmNameBuf, Device, Option<u32>)>> {
         let mut hdr = DmOptions::default().to_ioctl_hdr(None, DmFlags::empty())?;
-        let data_out = self.do_ioctl(dmi::DM_LIST_DEVICES_CMD as u8, &mut hdr, None)?;
+        let data_out = self.ioctl(dmi::DM_LIST_DEVICES_CMD as u8, &mut hdr, None)?;
 
         let mut devs = Vec::new();
         if !data_out.is_empty() {
@@ -327,7 +367,7 @@ impl DM {
             Self::hdr_set_uuid(&mut hdr, uuid)?;
         }
         debug!("Creating device {} (uuid={:?})", name, uuid);
-        self.do_ioctl(dmi::DM_DEV_CREATE_CMD as u8, &mut hdr, None)?;
+        self.ioctl(dmi::DM_DEV_CREATE_CMD as u8, &mut hdr, None)?;
 
         DeviceInfo::new(hdr)
     }
@@ -343,7 +383,7 @@ impl DM {
         let mut hdr = options.to_ioctl_hdr(Some(id), DmFlags::DM_DEFERRED_REMOVE)?;
 
         debug!("Removing device {}", id);
-        self.do_ioctl(dmi::DM_DEV_REMOVE_CMD as u8, &mut hdr, None)?;
+        self.ioctl(dmi::DM_DEV_REMOVE_CMD as u8, &mut hdr, None)?;
 
         DeviceInfo::new(hdr)
     }
@@ -370,7 +410,7 @@ impl DM {
         Self::hdr_set_name(&mut hdr, old_name)?;
 
         debug!("Renaming device {} to {}", old_name, new);
-        self.do_ioctl(dmi::DM_DEV_RENAME_CMD as u8, &mut hdr, Some(&data_in))?;
+        self.ioctl(dmi::DM_DEV_RENAME_CMD as u8, &mut hdr, Some(&data_in))?;
 
         DeviceInfo::new(hdr)
     }
@@ -409,7 +449,7 @@ impl DM {
             "Resuming"
         };
         debug!("{} device {}", action, id);
-        self.do_ioctl(dmi::DM_DEV_SUSPEND_CMD as u8, &mut hdr, None)?;
+        self.ioctl(dmi::DM_DEV_SUSPEND_CMD as u8, &mut hdr, None)?;
 
         DeviceInfo::new(hdr)
     }
@@ -421,7 +461,7 @@ impl DM {
         let mut hdr = DmOptions::default().to_ioctl_hdr(Some(id), DmFlags::empty())?;
 
         debug!("Retrieving info for {}", id);
-        self.do_ioctl(dmi::DM_DEV_STATUS_CMD as u8, &mut hdr, None)?;
+        self.ioctl(dmi::DM_DEV_STATUS_CMD as u8, &mut hdr, None)?;
 
         DeviceInfo::new(hdr)
     }
@@ -442,7 +482,7 @@ impl DM {
         let mut hdr = options.to_ioctl_hdr(Some(id), DmFlags::DM_QUERY_INACTIVE_TABLE)?;
 
         debug!("Waiting on event for {}", id);
-        let data_out = self.do_ioctl(dmi::DM_DEV_WAIT_CMD as u8, &mut hdr, None)?;
+        let data_out = self.ioctl(dmi::DM_DEV_WAIT_CMD as u8, &mut hdr, None)?;
 
         let status = DM::parse_table_status(hdr.target_count, &data_out)?;
 
@@ -535,7 +575,7 @@ impl DM {
         let data_in = cursor.into_inner();
 
         debug!("Loading table \"{:?}\" for {}", targets, id);
-        self.do_ioctl(dmi::DM_TABLE_LOAD_CMD as u8, &mut hdr, Some(&data_in))?;
+        self.ioctl(dmi::DM_TABLE_LOAD_CMD as u8, &mut hdr, Some(&data_in))?;
 
         DeviceInfo::new(hdr)
     }
@@ -545,7 +585,7 @@ impl DM {
         let mut hdr = DmOptions::default().to_ioctl_hdr(Some(id), DmFlags::empty())?;
 
         debug!("Clearing inactive dable for {}", id);
-        self.do_ioctl(dmi::DM_TABLE_CLEAR_CMD as u8, &mut hdr, None)?;
+        self.ioctl(dmi::DM_TABLE_CLEAR_CMD as u8, &mut hdr, None)?;
 
         DeviceInfo::new(hdr)
     }
@@ -561,7 +601,7 @@ impl DM {
         let mut hdr = options.to_ioctl_hdr(Some(id), DmFlags::DM_QUERY_INACTIVE_TABLE)?;
 
         debug!("Querying dependencies for {}", id);
-        let data_out = self.do_ioctl(dmi::DM_TABLE_DEPS_CMD as u8, &mut hdr, None)?;
+        let data_out = self.ioctl(dmi::DM_TABLE_DEPS_CMD as u8, &mut hdr, None)?;
 
         if data_out.is_empty() {
             Ok(vec![])
@@ -667,7 +707,7 @@ impl DM {
         )?;
 
         debug!("Retrieving table status for {}", id);
-        let data_out = self.do_ioctl(dmi::DM_TABLE_STATUS_CMD as u8, &mut hdr, None)?;
+        let data_out = self.ioctl(dmi::DM_TABLE_STATUS_CMD as u8, &mut hdr, None)?;
 
         let status = DM::parse_table_status(hdr.target_count, &data_out)?;
 
@@ -681,7 +721,7 @@ impl DM {
         let mut hdr = DmOptions::default().to_ioctl_hdr(None, DmFlags::empty())?;
 
         debug!("Listing loaded target versions");
-        let data_out = self.do_ioctl(dmi::DM_LIST_VERSIONS_CMD as u8, &mut hdr, None)?;
+        let data_out = self.ioctl(dmi::DM_LIST_VERSIONS_CMD as u8, &mut hdr, None)?;
 
         let mut targets = Vec::new();
         if !data_out.is_empty() {
@@ -737,7 +777,7 @@ impl DM {
         data_in.push(b'\0');
 
         debug!("Sending target message \"{}\" to {}", msg, id);
-        let data_out = self.do_ioctl(dmi::DM_TARGET_MSG_CMD as u8, &mut hdr, Some(&data_in))?;
+        let data_out = self.ioctl(dmi::DM_TARGET_MSG_CMD as u8, &mut hdr, Some(&data_in))?;
 
         let output = if (hdr.flags & DmFlags::DM_DATA_OUT.bits()) > 0 {
             Some(
@@ -764,7 +804,7 @@ impl DM {
         let mut hdr = DmOptions::default().to_ioctl_hdr(None, DmFlags::empty())?;
 
         debug!("Issuing device-mapper arm poll command");
-        self.do_ioctl(dmi::DM_DEV_ARM_POLL_CMD as u8, &mut hdr, None)?;
+        self.ioctl(dmi::DM_DEV_ARM_POLL_CMD as u8, &mut hdr, None)?;
 
         DeviceInfo::new(hdr)
     }
