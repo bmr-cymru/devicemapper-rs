@@ -161,6 +161,8 @@ impl DM {
             return OperationResult::Err(sync.unwrap_err());
         }
         let sync = sync.unwrap();
+        // reset low bis of event_nr
+        hdr.event_nr &= dmi::DM_UDEV_FLAGS_MASK;
         hdr.event_nr |= sync.cookie();
 
         debug!("Set kernel cookie to {}", hdr.event_nr);
