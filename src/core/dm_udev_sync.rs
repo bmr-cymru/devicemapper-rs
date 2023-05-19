@@ -31,6 +31,8 @@ pub mod sync_semaphore {
         IPC_RMID,
     };
 
+    use nix::sys::signal::{SigSet, SigmaskHow::SIG_SETMASK, SIGINT, SIGTERM};
+
     use rand::Rng;
     use retry::{delay::NoDelay, retry, OperationResult};
     use std::io;
@@ -59,6 +61,25 @@ pub mod sync_semaphore {
 
     lazy_static! {
         static ref SYSV_SEM_SUPPORTED: bool = sysv_sem_supported();
+    }
+
+    fn block_signals() -> DmResult<SigSet> {
+        let mut set = SigSet::empty();
+        let how = SIG_SETMASK;
+        set.add(SIGTERM);
+        set.add(SIGINT);
+        match set.thread_swap_mask(how) {
+            Ok(oldset) => Ok(oldset),
+            Err(_) => Err(DmError::udev_sync_error_from_os()),
+        }
+    }
+
+    fn unblock_signals(set: SigSet) -> DmResult<SigSet> {
+        let how = SIG_SETMASK;
+        match set.thread_swap_mask(how) {
+            Ok(oldset) => Ok(oldset),
+            Err(_) => Err(DmError::udev_sync_error_from_os()),
+        }
     }
 
     /// Test whether the system is configured for SysV semaphore support.
@@ -283,6 +304,7 @@ pub mod sync_semaphore {
     pub struct UdevSync {
         cookie: u32,
         semid: Option<i32>,
+        sigset: SigSet,
     }
 
     impl UdevSyncAction for UdevSync {
@@ -291,6 +313,7 @@ pub mod sync_semaphore {
         /// Allocate a SysV semaphore according to the device-mapper udev cookie
         /// protocol and set the initial state of the semaphore counter.
         fn begin(hdr: &mut dmi::Struct_dm_ioctl, ioctl: u8) -> DmResult<Self> {
+            let set = block_signals()?;
             match ioctl as u32 {
                 dmi::DM_DEV_REMOVE_CMD | dmi::DM_DEV_RENAME_CMD | dmi::DM_DEV_SUSPEND_CMD
                     if *SYSV_SEM_SUPPORTED && (hdr.flags & DmFlags::DM_SUSPEND.bits()) == 0 => {}
@@ -298,6 +321,7 @@ pub mod sync_semaphore {
                     return Ok(UdevSync {
                         cookie: 0,
                         semid: None,
+                        sigset: set,
                     });
                 }
             };
@@ -328,6 +352,7 @@ pub mod sync_semaphore {
             Ok(UdevSync {
                 cookie: hdr.event_nr,
                 semid: Some(semid),
+                sigset: set,
             })
         }
 
@@ -354,6 +379,7 @@ pub mod sync_semaphore {
                     error!("Failed to clean up notification semaphore: {}", err);
                 }
             }
+            unblock_signals(self.sigset)?;
             Ok(())
         }
 
@@ -369,6 +395,10 @@ pub mod sync_semaphore {
                     error!("Failed to clean up notification semaphore: {}", err);
                 }
             }
+            match unblock_signals(self.sigset) {
+                Ok(_) => (),
+                Err(_) => error!("Failed to unblock signals after UdevSync"),
+            };
         }
 
         /// Test whether this UdevSync instance has an active notification semaphore.
